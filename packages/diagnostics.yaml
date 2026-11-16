@@ -1,0 +1,41 @@
+# =====================================================================================================================
+# OPTIONAL add-on: diagnostics
+# Four memory sensors (diagnostic category in Home Assistant, updated every 10 s).
+# Useful to see how much internal RAM is left while testing passthrough + announcements + Music Assistant at once.
+# Uses the ESP-IDF heap functions directly, so it does not need ESPHome's heavier `debug` component.
+# Works with or without memory-saver.yaml.
+# =====================================================================================================================
+
+sensor:
+  - platform: template
+    name: "Free Internal Heap"          # internal RAM free right now
+    unit_of_measurement: B
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return (float) heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
+  - platform: template
+    name: "Min Free Internal Heap"      # lowest internal free value since boot (the number that tells you the safety margin)
+    unit_of_measurement: B
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return (float) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);'
+  - platform: template
+    name: "Largest Internal Block"      # biggest single internal allocation that would still succeed (fragmentation)
+    unit_of_measurement: B
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return (float) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);'
+  - platform: template
+    name: "Free PSRAM"                  # external RAM, plenty on this board
+    unit_of_measurement: B
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return (float) heap_caps_get_free_size(MALLOC_CAP_SPIRAM);'

@@ -1,0 +1,35 @@
+# Example: your own ESPHome device file for an Apollo CAST PRO-1 with line-in passthrough.
+# Copy this file, build it with ESPHome >= 2026.11, then flash it (see README.md).
+#
+# The repository's files are used as ESPHome *remote packages*: ESPHome downloads them from GitHub at build time, so
+# you only keep this one small file. Everything in `files:` is merged in the order listed.
+#
+#   cast-pro-1-passthrough.yaml   REQUIRED. Apollo's firmware (pinned) + passthrough + controller + ducking + entities.
+#   packages/memory-saver.yaml    OPTIONAL. Bluetooth proxy + WizMote off to free RAM. Must come AFTER the main file.
+#   packages/diagnostics.yaml     OPTIONAL. Four heap sensors. Anywhere in the list.
+#
+# Delete the lines of the add-ons you do not want. The main file works with none of them.
+
+packages:
+  passthrough:
+    url: https://github.com/anvarit/cast-pro-1-line-in-passthrough
+    ref: main                     # placeholder: pin a release tag or a commit so your build does not change under you
+    refresh: 1d
+    files:
+      - cast-pro-1-passthrough.yaml
+      - packages/memory-saver.yaml        # optional
+      - packages/diagnostics.yaml         # optional
+
+# Optional: your own settings on top. Anything you write here wins over the packages. Examples:
+#
+# substitutions:
+#   version: "26.11.3.3-passthrough-0.6-mine"     # what the "Apollo Firmware Version" sensor shows
+#
+# --- Alternative without GitHub at build time: copy the files next to this one and include them locally ---------------
+#
+# packages:
+#   passthrough: !include cast-pro-1-passthrough.yaml
+#   memory_saver: !include packages/memory-saver.yaml      # optional
+#   diagnostics: !include packages/diagnostics.yaml        # optional
+#
+# (Apollo's own firmware is still downloaded from GitHub by the pin inside cast-pro-1-passthrough.yaml.)

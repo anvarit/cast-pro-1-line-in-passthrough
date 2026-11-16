@@ -1,0 +1,422 @@
+# =====================================================================================================================
+# Apollo CAST PRO-1: line-in -> optical passthrough (local, no network round trip)
+# =====================================================================================================================
+#
+# What this file is
+#   An ESPHome "overlay" on top of Apollo Automation's stock CAST PRO-1 firmware. It does NOT copy Apollo's firmware:
+#   it pulls Apollo's configuration as a remote package, pinned to one exact release, and adds to it:
+#     1. the line-in (PCM1808 ADC) as a THIRD input of the audio mixer, next to Apollo's media and announcement inputs
+#     2. a small controller that detects signal, decides who plays, and ducks the other sources
+#     3. the Home Assistant entities to control it (all named "Line In ...")
+#     4. one change to Apollo's own player hooks so that exactly ONE piece of code ever changes the ducking
+#     5. removal of Apollo's built-in self-update (see the block "Apollo's self-update is removed" below)
+#
+# What it needs
+#   ESPHome >= 2026.11.0 (Apollo's own minimum). The pin below targets Apollo release 26.11.3.3.
+#
+# Optional add-ons (separate files in packages/, include them or not, this file works with or without them):
+#   packages/memory-saver.yaml   Bluetooth proxy + WizMote/ESP-NOW off at boot, to free ~96 KB of internal RAM
+#   packages/diagnostics.yaml    four heap sensors, handy to check memory headroom
+#
+# Hardware facts this design relies on
+#   * The line-in ADC (PCM1808) and the DAC for the analog output (PCM5122) share ONE I2S port. They cannot run at the
+#     same time, so passthrough only works while the audio output is set to "Optical".
+#   * The optical (S/PDIF) signal is generated in software by the ESP32-S3. That is why line-in can be mixed in
+#     digitally, and also why the output needs 1-2 seconds to restart after it has been silent for a while.
+#
+# Secrets: none in this file. Apollo's `api: encryption:` stays keyless exactly as in stock; the API key that Home
+# Assistant provisions on the device is kept in the device's flash across flashes.
+#
+# Unofficial community add-on, not affiliated with Apollo Automation. See README.md and LICENSE.
+# =====================================================================================================================
+
+substitutions:
+  # Shown in the "Apollo Firmware Version" sensor. Apollo version first, then this add-on's version.
+  version: "26.11.3.3-passthrough-0.6"
+
+packages:
+  # Apollo's stock firmware. To move to a newer Apollo release: change `ref` to the new tag's commit, re-read the
+  # "Updating" section of README.md (the hooks overridden below may have changed upstream), rebuild, re-test.
+  apollo:
+    url: https://github.com/ApolloAutomation/CAST_PRO-1
+    ref: e2a68480e2a724e944e22adbb4f45eb36445ad08   # tag 26.11.3.3
+    files: [Integrations/ESPHome/CAST_PRO-1.yaml]
+
+# =====================================================================================================================
+# Apollo's self-update is removed
+# =====================================================================================================================
+# Stock has an `update` entity plus "OTA by URL" that downloads Apollo's stock image. On a custom build that would keep
+# offering (and could install) Apollo's stock firmware over this one, silently removing the passthrough. So:
+#   * the update entity, the managed-OTA platform, the "Firmware Update" button and the "Firmware Channel" select go
+#   * the two scripts Apollo calls at boot / on network connect / every 6 h (check_for_update, apply_ota_source) stay as
+#     harmless no-ops, because Apollo's own files still call them by id
+# This lives in the main file (not in an add-on) on purpose: it is needed by every build of this firmware.
+# Updating from now on = rebuild with a newer pin and flash by ESPHome OTA (see README).
+update: !remove
+
+ota:
+  - id: !remove ota_managed
+
+button:
+  - id: !remove update_firmware
+
+script:
+  - id: !remove check_for_update
+  - id: !remove apply_ota_source
+  - id: check_for_update
+    mode: restart
+    then:
+      - logger.log:
+          level: DEBUG
+          format: "Self-update disabled in this custom build"
+  - id: apply_ota_source
+    then:
+      - script.execute: check_for_update
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # lp_duck_sync: the ONE place that changes ducking
+  # ------------------------------------------------------------------------------------------------------------------
+  # "Ducking" = turning a mixer input down by N dB (and back up) so that another source is heard clearly.
+  # Why a single owner: in stock, Apollo's media-player hooks duck the media input at announcement start/end, and
+  # un-duck it on EVERY player state publish (even a volume change). If the passthrough controller also ducks the
+  # same input (for "Line In wins"), the two fight: Apollo's un-duck lifts the radio/music back up for a second in
+  # the middle of line-in playback. The cure is that nobody else touches the ducking. Apollo's hooks (see
+  # media_player: below) now just call this script, and so does the 50 ms controller. It computes the wanted level of
+  # both inputs from the current state and only sends a new ramp when that target actually changes, so there is nothing
+  # to refresh or fight over. It has no delays inside, so it runs to completion within each call.
+  #
+  #   media (Music Assistant) target = announcing ? max(|Announcement Ducking|, what line-in wants) : what line-in wants
+  #   line-in target                 = announcing ? max(|Announcement Ducking|, 30 dB) : 0
+  #
+  # Ramps (milliseconds): ducking MORE at an announcement start happens at once (0), as in stock; un-ducking after an
+  # announcement takes 1000 as in stock; every other change takes 500. Line-in: ducks at once, restores in 1000.
+  - id: lp_duck_sync
+    mode: queued
+    then:
+      - lambda: |-
+          static int16_t media_applied = -1, line_applied = -1; static bool was_ann = false;
+          const bool ann = id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+          const int16_t ann_mag = (int16_t) clamp<float>(-id(announcement_ducking).state, 0.0f, 80.0f);
+          const int16_t want_m = id(lp_want_m);
+          const int16_t tm = ann ? std::max<int16_t>(ann_mag, want_m) : want_m;
+          if (tm != media_applied) {
+            uint32_t ms = 0;
+            if (media_applied >= 0) {
+              if (tm > media_applied) ms = ann ? 0 : 500;
+              else ms = (was_ann && !ann) ? 1000 : 500;
+            }
+            id(media_mixer_input).apply_ducking((uint8_t) tm, ms); media_applied = tm;
+          }
+          const int16_t tl = ann ? std::max<int16_t>(ann_mag, 30) : 0;
+          if (tl != line_applied) {
+            id(linein_mixer_input).apply_ducking((uint8_t) tl, tl > line_applied ? 0 : 1000); line_applied = tl;
+          }
+          was_ann = ann;
+
+# =====================================================================================================================
+# Apollo's media-player hooks: same behaviour, but ducking goes through lp_duck_sync
+# =====================================================================================================================
+# Apollo's Core.yaml ducks / un-ducks media_mixer_input directly in on_announcement and on_state. Both hooks are
+# replaced by copies that keep everything else (LED, the announcement_triggered flag, DAC unmute) exactly as in stock and
+# call lp_duck_sync instead of ducking themselves.
+# The two-step `!extend` is how ESPHome replaces a key that a package already defines: the first entry removes both
+# keys, the second adds the new versions. (Verified with `esphome config`, see docs/test-log.md.)
+media_player:
+  - id: !extend external_media_player
+    on_announcement: !remove
+    on_state: !remove
+  - id: !extend external_media_player
+    on_announcement:
+      - if:
+          condition:
+            - lambda: return (!id(announcement_triggered));
+          then:
+            - lambda: id(announcement_triggered) = true;
+            - light.turn_on:
+                id: rgb_light
+                blue: 100%
+                red: 0%
+                green: 100%
+                brightness: !lambda "return id(announcement_led_brightness).state / 100.0f;"
+            - script.execute: lp_duck_sync      # stock: duck the media input by |Announcement Ducking|, 0 s ramp
+            - wait_until:
+                media_player.is_announcing: external_media_player
+            - wait_until:
+                - not:
+                    media_player.is_announcing: external_media_player
+            - script.execute: lp_duck_sync      # stock: un-duck the media input, 1 s ramp
+            - light.turn_off:
+                id: rgb_light
+            - lambda: id(announcement_triggered) = false;
+    on_state:
+      # The PCM5122 DAC boots muted; unmute it (idempotent), as stock does
+      - audio_dac.mute_off: external_dac
+      - script.execute: lp_duck_sync          # stock: un-duck the media input, 1 s ramp, when not announcing
+
+# =====================================================================================================================
+# The line-in as a third mixer input
+# =====================================================================================================================
+speaker:
+  - platform: mixer
+    id: !extend mixer_speaker_id
+    source_speakers:
+      - id: linein_mixer_input
+        buffer_duration: 60ms
+        timeout: 500ms
+
+globals:
+  # Shared between the audio callback (runs on the microphone task) and the 50 ms controller, hence atomics.
+  - id: lp_feed               # true while line-in samples should be copied into the mixer input
+    type: std::atomic<bool>
+  - id: lp_gain_q16           # line-in gain as a 16.16 fixed-point factor
+    type: std::atomic<int32_t>
+  - id: lp_power_bits         # last measured 100 ms signal power (a float, stored as bits)
+    type: std::atomic<uint32_t>
+  - id: lp_windows            # counts finished 100 ms measurement windows
+    type: std::atomic<uint32_t>
+  - id: lp_holding            # true while this add-on owns the ADC (has started it)
+    type: bool
+    initial_value: 'false'
+  - id: lp_scratch            # gain-scaled copy of the ADC buffer, kept in PSRAM (not scarce internal RAM)
+    type: int32_t *
+    initial_value: 'nullptr'
+  - id: lp_want_m             # how many dB the line-in wants Music Assistant ducked; set by the controller
+    type: int16_t
+    initial_value: '0'
+
+esphome:
+  on_boot:
+    - priority: 600
+      then:
+        - lambda: |-
+            id(lp_scratch) = (int32_t *) heap_caps_malloc(16384, MALLOC_CAP_SPIRAM);
+            id(lp_gain_q16).store(65536);
+            id(linein_mixer_input).set_audio_stream_info(audio::AudioStreamInfo(32, 2, 48000));
+            // This callback is called by the ADC for every block of samples. It must never block.
+            id(line_in_adc).add_data_callback([](const microphone::AudioCapture &c) {
+              if (c.stream_info.get_bits_per_sample() != 32 || c.stream_info.get_channels() != 2) return;
+              const int32_t *s = reinterpret_cast<const int32_t *>(c.data.data());
+              const size_t n = c.data.size() / 4;
+              // 1) Signal level: mean power over ~100 ms windows (same approach as upstream draft PR #21,
+              //    no DC removal). Full scale = 0 dBFS.
+              static int64_t sq = 0; static uint32_t cnt = 0;
+              for (size_t i = 0; i < n; i++) { const int64_t x = s[i] >> 8; sq += x * x; }
+              if ((cnt += n) >= 9600) {
+                float p = (float) ((double) sq / cnt / 70368744177664.0); uint32_t b;
+                memcpy(&b, &p, 4); id(lp_power_bits).store(b); id(lp_windows).fetch_add(1); sq = 0; cnt = 0;
+              }
+              // 2) Audio: apply the gain and hand the samples to the mixer input, but only while the controller
+              //    wants the path open.
+              if (!id(lp_feed).load() || id(lp_scratch) == nullptr || n * 4 > 16384) return;
+              const int64_t g = id(lp_gain_q16).load();
+              for (size_t i = 0; i < n; i++)
+                id(lp_scratch)[i] = (int32_t) clamp<int64_t>((s[i] * g) >> 16, INT32_MIN, INT32_MAX);
+              id(linein_mixer_input).play((const uint8_t *) id(lp_scratch), n * 4, 0);  // timeout 0: never block the mic task
+            });
+            // Apollo's own "line-in to Music Assistant" (Sendspin source) starts and stops the same ADC. When that
+            // starts while we hold the ADC, undo its extra start so the ADC start/stop count stays balanced and our
+            // path is not cut. This runs after Apollo's handler.
+            id(sendspin_hub)->add_on_source_streaming_started_callback([]() {
+              if (id(lp_holding)) { id(line_in_capture_start).stop(); id(line_in_adc).start(); }
+            });
+
+# =====================================================================================================================
+# Home Assistant entities
+# =====================================================================================================================
+select:
+  # Apollo's "Firmware Channel" select belongs to the self-update that was removed above
+  - id: !remove firmware_channel
+  - platform: template
+    id: lp_mode
+    name: "Line In Passthrough"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options: ["Off", "Auto", "Always"]
+    # Off on the very first boot so that flashing changes nothing audible; switch to Auto when ready
+    initial_option: "Off"
+  - platform: template
+    id: lp_priority
+    name: "Line In Priority"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options: ["Line In wins", "Music Assistant wins", "Mix", "Duck other"]
+    initial_option: "Line In wins"
+
+number:
+  - platform: template
+    id: lp_threshold
+    name: "Line In Threshold"
+    unit_of_measurement: dBFS
+    min_value: -80
+    max_value: -20
+    step: 1
+    initial_value: -50
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lp_attack
+    name: "Line In Start After"
+    unit_of_measurement: s
+    min_value: 0.2
+    max_value: 10
+    step: 0.1
+    initial_value: 0.2
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lp_release
+    name: "Line In Release After"
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 600
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lp_duck_db
+    name: "Line In Duck Amount"
+    unit_of_measurement: dB
+    min_value: 0
+    max_value: 60
+    step: 1
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lp_keep_warm
+    name: "Line In Keep Warm"
+    unit_of_measurement: min
+    min_value: 0
+    max_value: 1440
+    step: 1
+    initial_value: 15
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lp_gain_db
+    name: "Line In Gain"
+    unit_of_measurement: dB
+    min_value: -30
+    max_value: 12
+    step: 0.5
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - lambda: 'id(lp_gain_q16).store((int32_t) (65536.0f * powf(10.0f, x / 20.0f)));'
+
+sensor:
+  - platform: template
+    id: lp_level
+    name: "Line In Level"
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: lp_signal
+    name: "Line In Signal"
+    device_class: sound
+  - platform: template
+    id: lp_active
+    name: "Line In Passthrough Active"
+    device_class: running
+
+# =====================================================================================================================
+# The controller: runs every 50 ms
+# =====================================================================================================================
+interval:
+  - interval: 50ms
+    startup_delay: 30s
+    then:
+      - lambda: |-
+          static uint32_t last_w = 0, above = 0, below = 0, preroll = 0, lvl_n = 0;
+          static float lvl = 0; static bool sig = false, feeding = false;
+          static uint32_t last_sig_ms = 0; static bool sig_seen = false;   // keep-warm bookkeeping
+          const uint32_t now = millis();
+          const bool optical = id(audio_output).current_option() == "Optical";
+          const bool streaming = id(sendspin_hub)->is_source_streaming();
+          const bool off = id(lp_mode).current_option() == "Off", always = id(lp_mode).current_option() == "Always";
+
+          // ---- 1. Who owns the ADC? --------------------------------------------------------------------------------
+          // Only when the audio output is Optical (the ADC shares its I2S port with the analog DAC). Before starting we
+          // check that the internal RAM the ADC needs can really be allocated, the same trial Apollo's line_in.yaml does.
+          if (!off && optical && !id(lp_holding) && id(line_in_adc).is_stopped() && !id(dac_speaker).is_running()) {
+            const size_t sz[] = {2048, 2048, 2048, 2048, 4096 + 512, 6144 + 512};
+            void *t[6] = {}; bool ok = true;
+            for (int i = 0; ok && i < 6; i++)
+              ok = (t[i] = heap_caps_malloc(sz[i], MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | (i < 4 ? MALLOC_CAP_DMA : 0)));
+            for (void *p : t) heap_caps_free(p);
+            if (ok) { id(line_in_adc).start(); id(lp_holding) = true; }
+          } else if ((off || !optical) && id(lp_holding)) { id(line_in_adc).stop(); id(lp_holding) = false; }
+
+          // ---- 2. Signal detection with debounce -------------------------------------------------------------------
+          // Signal = level at or above Threshold for at least "Start After". Silence = level more than 6 dB below the
+          // Threshold (hysteresis, so a level hovering around the threshold does not flap) for at least "Release After".
+          const uint32_t w = id(lp_windows).load();
+          if (!id(line_in_adc).is_running()) { sig = false; above = below = 0; }
+          else if (w != last_w) {
+            last_w = w; float p; const uint32_t b = id(lp_power_bits).load(); memcpy(&p, &b, 4);
+            const float db = p > 1e-12f ? 10.0f * log10f(p) : -120.0f, thr = id(lp_threshold).state;
+            // Line In Level sensor: average of 10 windows (~1 s)
+            lvl += p; if (++lvl_n >= 10) { id(lp_level).publish_state(10.0f * log10f(lvl / lvl_n + 1e-12f)); lvl = 0; lvl_n = 0; }
+            if (db >= thr) { below = 0; if (!above) above = now; } else if (db < thr - 6) { above = 0; if (!below) below = now; }
+            if (!sig && above && now - above >= id(lp_attack).state * 1000) sig = true;
+          }
+          // Silence during an announcement does not count toward Release After: an announcement ducks line-in, and the
+          // source can go quiet around it. The release timer restarts with the first quiet window after the
+          // announcement. Without this, a pause around an announcement could end the signal and briefly un-duck the
+          // other source (heard as music popping up for ~1 s).
+          const bool announcing = id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+          if (announcing) below = 0;
+          if (sig && below && now - below >= id(lp_release).state * 1000) sig = false;
+
+          // ---- 3. Keep warm ----------------------------------------------------------------------------------------
+          // The S/PDIF output shuts down after a stretch of silence and needs 1-2 s to restart. That swallowed the
+          // start of the audio each time line-in came back after a pause. So the path (and the S/PDIF output) is held
+          // open for "Keep Warm" minutes after the last signal, playing the (silent) line-in. 0 = no warm period.
+          if (off) sig_seen = false;
+          if (sig) { last_sig_ms = now; sig_seen = true; }
+          const uint32_t kw_ms = (uint32_t) (id(lp_keep_warm).state * 60000.0f);   // max 1440 min = 86.4e6 ms
+          bool timer_warm = false;
+          if (sig_seen && !sig) {
+            timer_warm = kw_ms > 0 && (uint32_t) (now - last_sig_ms) < kw_ms;      // unsigned difference is wrap-safe
+            if (!timer_warm) sig_seen = false;                                     // expired (also avoids 49-day wrap)
+          }
+          const bool warm = always || sig || timer_warm;
+
+          // ---- 4. Who plays? ---------------------------------------------------------------------------------------
+          // The path is open when the ADC runs, Music Assistant is not currently receiving line-in from this device
+          // (Sendspin source), and we are warm. With "Music Assistant wins" it also stays closed while Music Assistant plays.
+          const auto prio = id(lp_priority).current_option();
+          const bool media = !id(media_mixer_input).is_stopped();
+          bool active = id(line_in_adc).is_running() && !streaming && warm;
+          if (prio == "Music Assistant wins" && media) active = false;
+          // ~40 ms pre-roll after opening, so the S/PDIF buffer does not run empty (clicks)
+          if (active && !feeding) { id(linein_mixer_input).set_pause_state(true); preroll = now; }
+          if (!active && feeding) id(linein_mixer_input).finish();
+          if (preroll && now - preroll >= 40) { id(linein_mixer_input).set_pause_state(false); preroll = 0; }
+          feeding = active; id(lp_feed).store(active);
+
+          // ---- 5. Ducking ------------------------------------------------------------------------------------------
+          // Ducking follows the SIGNAL, not the open path: during the warm period or in Always mode with nothing
+          // playing on line-in, Music Assistant keeps full volume. Only the wanted duck of the media input is decided
+          // here; lp_duck_sync applies it (together with the announcement ducks) as the single owner of ducking.
+          //   Line In wins: 80 dB (effectively muted)   Duck other: "Line In Duck Amount"   Mix / MA wins: 0
+          id(lp_want_m) = !(active && sig) ? 0 : prio == "Line In wins" ? 80 : prio == "Duck other" ? (int16_t) id(lp_duck_db).state : 0;
+          id(lp_duck_sync).execute();
+
+          // ---- 6. Entities -----------------------------------------------------------------------------------------
+          if (!id(lp_signal).has_state() || id(lp_signal).state != sig) id(lp_signal).publish_state(sig);
+          if (!id(lp_active).has_state() || id(lp_active).state != feeding) id(lp_active).publish_state(feeding);

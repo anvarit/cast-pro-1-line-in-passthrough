@@ -1,0 +1,10 @@
+# ESPHome build output and caches
+.esphome/
+build/
+*.bin
+*.elf
+*.zip
+# Local secrets and private files never go in this repo
+secrets.yaml
+*.key
+.env

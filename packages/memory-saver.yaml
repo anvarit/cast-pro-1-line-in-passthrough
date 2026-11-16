@@ -1,0 +1,88 @@
+# =====================================================================================================================
+# OPTIONAL add-on: memory-saver
+# Turns Bluetooth proxy and WizMote (ESP-NOW) off at boot to free internal RAM.
+# Include it AFTER cast-pro-1-passthrough.yaml in your packages (see example-device.yaml).
+# =====================================================================================================================
+#
+# Why: the ESP32-S3 has little internal RAM, and the S/PDIF output, the ADC and announcements all need chunks of it at
+# the same time. On the author's unit (measured, idle, passthrough Auto, nothing playing):
+#                                  without memory-saver     with memory-saver
+#     free internal heap                 ~88 KB                  ~184 KB
+#     lowest free heap since boot       ~8 KB (*)                ~105 KB (*)
+#   (*) worst case: passthrough + Music Assistant playback + an announcement at the same time, lowest free value seen
+#       since boot. Measured on one unit; see docs/test-log.md.
+#
+# What you give up (the trade-off):
+#   * Bluetooth proxy: the CAST PRO-1 can no longer relay Bluetooth devices to Home Assistant. The "Bluetooth Proxy"
+#     switch stays visible but does nothing (always Off).
+#   * WizMote: ESP-NOW is never started, so a WizMote remote cannot control the speaker. The WizMote entities stay
+#     visible but cannot work.
+#   If you use neither (check in Home Assistant whether any device depends on this proxy), you lose nothing.
+#
+# Why ESP-NOW matters for RAM: starting ESP-NOW is what loads the Wi-Fi driver on a wired (Ethernet) unit; Wi-Fi itself
+# is otherwise off while Ethernet is up. Switching ESP-NOW off at boot therefore also keeps the Wi-Fi driver unloaded.
+#
+# Everything below overrides Apollo's configuration by id (no Apollo file is copied or forked). This add-on needs the
+# Apollo package from the main file; it is not usable on its own.
+# =====================================================================================================================
+
+espnow:
+  enable_on_boot: false
+
+esp32_ble:
+  enable_on_boot: false
+
+# The "Bluetooth Proxy" switch stays as an entity but is inert: boot state is always Off and turning it on/off does
+# nothing. (Stock turn_on starts a BLE scan, which would only log "Cannot start scan while ESP32BLE is disabled".)
+switch:
+  - id: !extend bluetooth_proxy_switch
+    restore_mode: ALWAYS_OFF
+    on_turn_on: !remove
+    on_turn_off: !remove
+
+script:
+  # Apollo has two runtime paths that would load the Wi-Fi driver / ESP-NOW again and give the RAM back. Both are
+  # replaced here, still under the same ids so Apollo's own calls keep working.
+  #
+  # wifi_release_radio: stock turns Wi-Fi off once Ethernet is up and then does espnow.disable(); espnow.enable()
+  # (which re-initialises the radio). Here: the same, minus the ESP-NOW bounce.
+  # wifi_recovery_probe: stock turns Wi-Fi on every 10 minutes (if Wi-Fi was ever provisioned) to see whether it still
+  # works. Here: a no-op, Wi-Fi stays off while Ethernet is up.
+  - id: !remove wifi_release_radio
+  - id: !remove wifi_recovery_probe
+  - id: wifi_recovery_probe
+    mode: restart
+    then:
+      - logger.log:
+          level: DEBUG
+          format: "Wi-Fi recovery probe skipped (memory-saver: Wi-Fi stays off while Ethernet is up)"
+  - id: wifi_release_radio
+    then:
+      - lambda: "id(ethernet_expected) = true;"
+      - if:
+          condition:
+            wifi.ap_active:
+          then:
+            - lambda: |-
+                ESP_LOGW("network", "Rebooting to fully release the active hotspot (one-time)");
+            - delay: 500ms
+            - lambda: "App.safe_reboot();"
+          else:
+            - wifi.disable:
+            - lambda: |-
+                if (id(captive_portal_1).is_active()) {
+                  id(captive_portal_1).end();
+                }
+
+interval:
+  # Apollo's WizMote channel scan (every 2 s) would call espnow.set_channel on an ESP-NOW that is switched off, which
+  # logs an error and marks the component failed. Made inert.
+  - id: !extend wizmote_channel_scan
+    then: !remove
+  - id: !extend wizmote_channel_scan
+    then:
+      - delay: 0s
+
+# What happens if the Ethernet cable is pulled (not tested on hardware): Apollo's stock fallback is unchanged. Wi-Fi is
+# started with its stored credentials, and the fallback hotspot appears after 90 s as in stock. ESP-NOW stays off until
+# the next reboot. When Ethernet returns, wifi_release_radio above turns Wi-Fi off again.
