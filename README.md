@@ -9,8 +9,10 @@ to hear a local source (a computer's headphone/line output, a TV, a turntable pr
 play Music Assistant and Home Assistant announcements on them. The line-in starts by itself when sound arrives, and
 Music Assistant steps aside while it plays.
 
-> **Status: works for me, on one unit. A 24-hour soak test is still running** (started 2026-11-16); this note will be
-> updated with the result. Please read [Known limitations](#known-limitations) and the
+> **Status: works for me, on one unit.** Version 0.6 ran for about 23 hours without a reboot; the lowest free internal
+> heap was 105 KB with `memory-saver` (my target was 20 KB), and there was one false trigger from a short sound (Start
+> After was 0.2 s then, which is why the default is now 1 s). Version 0.7, this one, has only been running briefly (flashed
+> 2026-11-17), so it has had much less testing than 0.6. Please read [Known limitations](#known-limitations) and the
 > [disclaimer](#disclaimer) before flashing.
 
 ## What it does
@@ -34,7 +36,8 @@ line-in jack -> PCM1808 ADC -> ESP32-S3 mixer (new 3rd input) -> S/PDIF generate
 
 - Mode **Off / Auto / Always**. Auto starts when a signal is detected and stops after silence.
 - **Priority** when Music Assistant is playing too: *Line In wins*, *Music Assistant wins*, *Mix*, *Duck other*.
-- Adjustable detection **threshold**, **start** and **release** delays, **duck amount**, **gain**.
+- Adjustable detection **threshold**, **start** and **release** delays, **duck amount**, **gain** (up to +24 dB) and a
+  **Music Assistant Trim** that turns Music Assistant down permanently, to balance the two levels.
 - **Keep warm**: after the last signal the path stays open for a while, because the S/PDIF output needs 1-2 seconds to
   restart after silence and would otherwise clip the beginning of the next sound.
 - **Announcements still work** (Home Assistant TTS, doorbell, ...): they duck line-in and Music Assistant as in stock.
@@ -51,11 +54,12 @@ All settings are "config" entities and are remembered across reboots.
 | Line In Passthrough | select | **Off** on first boot | `Off`: nothing happens. `Auto`: open the path when a signal is detected, close it after silence (plus keep-warm). `Always`: path always open. |
 | Line In Priority | select | Line In wins | What happens to Music Assistant while line-in has a signal. `Line In wins`: Music Assistant is silenced (-80 dB). `Music Assistant wins`: line-in is closed while Music Assistant plays. `Mix`: both play at full level. `Duck other`: Music Assistant is turned down by *Line In Duck Amount*. |
 | Line In Threshold | number, dBFS | -50 | Level at or above which line-in counts as "signal". Raise it if the noise floor of your source triggers it. |
-| Line In Start After | number, s | 0.2 | Signal must be present this long before passthrough starts. |
-| Line In Release After | number, s | 20 | Silence (more than 6 dB below the threshold) must last this long before the signal is considered gone. Paused during announcements. |
+| Line In Start After | number, s | 1.0 | Signal must be present this long before passthrough starts. The default was 0.2 s up to 0.6; at 0.2 s a short blip (a notification sound, a click) was enough to open the path and silence Music Assistant for the whole release time, so it is 1 s now. Real sound still starts within a second; lower it if you want the very first word, raise it if blips still trigger. |
+| Line In Release After | number, s | 8 | Silence (more than 6 dB below the threshold) must last this long before the signal is considered gone. Paused during announcements. The default was 20 s up to 0.6; that felt too long before Music Assistant came back. The trade-off: a quiet passage longer than this ends the line-in signal (the path itself stays open for Keep Warm, so the next sound is not cut). Announcements are handled separately: the timer does not run while one plays. |
 | Line In Keep Warm | number, min | 15 | Keep the path (and the S/PDIF output) open this long after the last signal. `0` = no warm period. |
 | Line In Duck Amount | number, dB | 30 | How much Music Assistant is turned down in `Duck other`. |
-| Line In Gain | number, dB | 0 | Gain applied to line-in (-30 to +12). Digital: it cannot add headroom the ADC does not have. |
+| Line In Gain | number, dB | 0 | Gain applied to line-in (-30 to +24; up to +12 before 0.7). Digital: it cannot add headroom the ADC does not have, and it raises the source's own noise by the same amount. To balance a weak line-in against Music Assistant, turn Music Assistant down with *Music Assistant Trim* first and use gain only for the rest. |
+| Music Assistant Trim | number, dB | 0 | Turns the Music Assistant (media) input down by 0 to 30 dB (slider 0 to -30), all the time, without touching line-in or announcements. It adds to the ducking: with no line-in signal, or in `Mix` / `Music Assistant wins`, Music Assistant plays at the trim level; in `Duck other` it is turned down by trim plus duck amount; in `Line In wins` it is silent; an announcement turns it down by the larger of trim plus the announcement ducking and what line-in wants. Capped at 80 dB in total. 0 = same behaviour as 0.6. |
 | Line In Level | sensor, dBFS | - | Measured level at the ADC input (before gain and ducking). Use it to choose a threshold. |
 | Line In Signal | binary sensor | - | On while a signal is detected. |
 | Line In Passthrough Active | binary sensor | - | On while the local path is open (signal, keep-warm period, or `Always`). |
@@ -80,10 +84,11 @@ With `diagnostics.yaml`: *Free Internal Heap*, *Min Free Internal Heap*, *Larges
 You build your own firmware from a small device file and flash it over the air. Nothing here is a ready-made binary.
 
 1. Copy [`example-device.yaml`](example-device.yaml) to your ESPHome config folder. It pulls this repository's files as
-   ESPHome remote packages. Delete the add-on lines you do not want (the main file works with none of them) and pin
-   `ref:` to a release tag or commit instead of `main`.
+   ESPHome remote packages. Delete the add-on lines you do not want (the main file works with none of them). `ref:` is
+   pinned to the release tag `v0.7.0`; use a tag or commit, not `main`.
    If you prefer, copy `cast-pro-1-passthrough.yaml` (and the files from `packages/` you want) next to your device file
    and include them with `!include`, see the comments in the example. Include `memory-saver.yaml` **after** the main file.
+   The example pins `ref: v0.7.0` (this release's tag); keep a tag or commit there so your build does not change under you.
 2. Build and flash by OTA with ESPHome (CLI or Device Builder):
 
    ```bash
@@ -103,7 +108,7 @@ Notes:
   Add an `ota: password:` of your own if that matters to you.
 - The **API encryption key** that Home Assistant provisioned on the device is kept in flash across the flash. Your
   device stays paired; you do not re-add it.
-- The project version shows in the *Apollo Firmware Version* sensor, for example `26.11.3.3-passthrough-0.6`.
+- The project version shows in the *Apollo Firmware Version* sensor, for example `26.11.3.3-passthrough-0.7`.
 
 ## What you give up
 
@@ -156,10 +161,16 @@ Everything below was measured or observed on **one** CAST PRO-1 on **wired Ether
   184 KB with it. Lowest free internal heap seen since boot in the worst case (passthrough + Music Assistant +
   announcement): about 8 KB without, about 105 KB with. Without `memory-saver` the margin is thin; I would include it if
   you do not need Bluetooth proxy or WizMote.
+- **Soak (version 0.6):** about 23 hours on one unit without a reboot; lowest free internal heap 105 KB with
+  `memory-saver` (the target was 20 KB). One false trigger from a short sound, when Start After was 0.2 s; closed by
+  raising the default to 1 s in 0.7. Version 0.7 itself has only run briefly so far (flashed 2026-11-17).
+- **Level balance (0.7):** my source is a computer dock at full volume, which delivers about -31 dBFS on music. By ear,
+  a good balance with Music Assistant radio was *Music Assistant Trim* -10 dB and *Line In Gain* +10 dB.
 - **Tested by ear:** Auto (start, release, keep-warm), Always, the priority modes *Line In wins*, *Duck other* and
   *Mix*, and announcements with Music Assistant and line-in both playing.
-- **Not tested yet:** the priority mode *Music Assistant wins*, and actually streaming line-in to Music Assistant
-  (Sendspin Source) with this firmware installed (the source is still offered in Music Assistant; I have not played it).
+- **Not tested yet:** the priority mode *Music Assistant wins*; actually streaming line-in to Music Assistant
+  (Sendspin Source) with this firmware installed (the source is still offered in Music Assistant; I have not played it);
+  the Wi-Fi fallback with `memory-saver`; latency in milliseconds; and gain above +12 dB, which I have not listened to.
 - The firmware image is about 2.24 MB (OTA image, 57 % of the 3.84 MB app slot), with or without the add-ons.
 
 ## Known limitations
@@ -176,6 +187,7 @@ Everything below was measured or observed on **one** CAST PRO-1 on **wired Ether
   on hardware**; it follows from reading Apollo's code (see the comments in `packages/memory-saver.yaml`).
 - Without `memory-saver`, internal RAM gets tight when passthrough, Music Assistant and an announcement run together.
 - Latency was judged by ear, not measured.
+- Version 0.7 (Music Assistant Trim, gain up to +24 dB, the new defaults) has had only a short run on the author's unit.
 - Built on a **pre-release** ESPHome (2026.11.0-dev). Re-test when 2026.11 stable is out.
 
 ## Troubleshooting
@@ -187,6 +199,8 @@ Everything below was measured or observed on **one** CAST PRO-1 on **wired Ether
 | Passthrough starts by itself with nothing playing | Source noise floor above the threshold | Raise *Line In Threshold* |
 | Start of each sound is cut after a pause | Optical output restarting after silence | Increase *Line In Keep Warm* (or use `Always`) |
 | Line-in gets cut in the middle of a quiet passage | Silence longer than *Release After* | Increase *Line In Release After* |
+| Radio / Music Assistant drops out for the release time with nothing playing on line-in | A short sound (a click, a notification) crossed the threshold and opened the path | Raise *Line In Start After* or *Line In Threshold* |
+| Line-in is much quieter than Music Assistant | Weak source level (a computer at full volume gives about -31 dBFS) | Turn Music Assistant down with *Music Assistant Trim* first, then add *Line In Gain* if needed; gain also raises the source's noise |
 | Music Assistant pops up for a moment during line-in | Old behaviour of an early version, or a different source of ducking | Make sure you run version 0.5 or newer (shown in *Apollo Firmware Version*) |
 | Cannot build: "unknown id" / merge error | Apollo changed an id this add-on overrides | See [Updating](#updating-when-apollo-releases-a-new-version) |
 | Cannot build: ESPHome too old | Needs ESPHome >= 2026.11 | Use a newer ESPHome |

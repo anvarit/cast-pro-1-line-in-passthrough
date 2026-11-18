@@ -15,6 +15,8 @@ same speakers keep working.
 - The ESP32-S3 has limited internal RAM; the S/PDIF output, the ADC and announcements each need DMA-capable internal
   buffers. This is the main risk of the design (see `packages/memory-saver.yaml`).
 - Apollo's stock firmware has no OTA password; the device has two app slots of about 3.84 MB (the stock image is about 2.25 MB).
+- The line-in gain is a 16.16 fixed-point factor and the product with a 32-bit sample is 64-bit; at the +24 dB maximum
+  it stays below 2^52, then is clamped to 32 bits.
 
 ## Architecture: a third mixer input
 
@@ -29,6 +31,24 @@ same speakers keep working.
 - Priority is done with ducking: "Line In wins" turns the Music Assistant input down by 80 dB; "Duck other" by the
   configured amount; "Mix" and "Music Assistant wins" do not duck (the latter closes the line-in path while Music
   Assistant plays).
+
+### Music Assistant Trim (0.7)
+
+A weak line-in source has to be balanced against Music Assistant. Gain on line-in also amplifies the source's noise, so
+the cleaner way is to turn Music Assistant down. The trim is a base attenuation of the media mixer input only, applied
+inside `lp_duck_sync` so it does not fight any other ducking. With `trim` = |Music Assistant Trim| (0 to 30 dB) and
+`want` = what line-in asks of Music Assistant (Line In wins 80, Duck other = Duck Amount, otherwise 0):
+
+| Situation | Media input is turned down by |
+| --- | --- |
+| No line-in signal, `Mix`, `Music Assistant wins` | trim |
+| `Duck other` with a signal | trim + duck amount |
+| `Line In wins` with a signal | 80 dB (silent) |
+| Announcement | the larger of (trim + announcement ducking) and the value above |
+
+Everything is capped at 80 dB. The announcement input and line-in are never trimmed. Line-in itself is only ever ducked
+during announcements. With the trim at 0 the result is identical to 0.6. The slider calls the script directly, so a change
+is heard at once; before the slider has a state after boot, the trim counts as 0.
 
 ### Rejected: writing straight to the S/PDIF speaker
 
@@ -45,6 +65,10 @@ standby, which I have not checked.
 un-duck it on every state publish (including volume changes). With line-in also ducking that input, the two fight, and
 the music came back for about a second. The fix is structural, not a timer: one script (`lp_duck_sync`) is the only code
 that calls `apply_ducking`; Apollo's hooks and the controller call it; it only sends a ramp when the target changes.
+
+**Defaults (0.7).** *Start After* is 1 s: at 0.2 s a short sound opened the path and muted Music Assistant for the whole
+*Release After*. *Release After* is 8 s: 20 s felt too long before Music Assistant came back, and the announcement case no
+longer needs a long value because the timer is paused during announcements.
 
 **Release After pauses during announcements.** An announcement ducks line-in, and the source can sit at its noise floor
 around it. If that silence counted, *Release After* could run out during the announcement and un-duck the music for a

@@ -13,7 +13,7 @@
 packages:
   passthrough:
     url: https://github.com/anvarit/cast-pro-1-line-in-passthrough
-    ref: main                     # placeholder: pin a release tag or a commit so your build does not change under you
+    ref: v0.7.0                   # pinned to a release tag so your build does not change under you; use a tag or commit, not main
     refresh: 1d
     files:
       - cast-pro-1-passthrough.yaml
@@ -23,7 +23,7 @@ packages:
 # Optional: your own settings on top. Anything you write here wins over the packages. Examples:
 #
 # substitutions:
-#   version: "26.11.3.3-passthrough-0.6-mine"     # what the "Apollo Firmware Version" sensor shows
+#   version: "26.11.3.3-passthrough-0.7-mine"     # what the "Apollo Firmware Version" sensor shows
 #
 # --- Alternative without GitHub at build time: copy the files next to this one and include them locally ---------------
 #

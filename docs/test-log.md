@@ -5,7 +5,7 @@ Speakers on the optical output; a computer on the line-in; Music Assistant and H
 other sources. Versions refer to [CHANGELOG.md](../CHANGELOG.md). Builds were flashed by OTA.
 Where a result below was observed by ear it says so; numbers come from the device's own heap sensors and logs.
 
-## Build verification of this repository's files
+## Build verification of this repository's files (version 0.7)
 
 `esphome config` and `esphome compile` (no upload), ESPHome `2026.11.0-dev20261104` container, `--network host --memory 4g`.
 Both variants: config valid, compile clean (only three warnings from upstream code: `PACKED` redefined in `bt_types.h`,
@@ -13,16 +13,17 @@ a `%d` format in Apollo's `wizmote.yaml`, `cos_LSF_QA` in the Opus library).
 
 | Variant | OTA image | Factory image | Flash use | Static RAM |
 | --- | --- | --- | --- | --- |
-| main file only | 2,242,144 B | 2,307,680 B | 57.0 % of 3,932,160 B | 44.1 % |
-| main + memory-saver + diagnostics | 2,240,576 B | 2,306,112 B | 57.0 % | 44.1 % |
+| main file only | not recorded | not recorded | 2,242,272 B, 57.0 % of 3,932,160 B | 44.2 % |
+| main + memory-saver + diagnostics | 2,240,832 B | 2,306,368 B | 2,240,716 B, 57.0 % | 44.2 % |
 
 The remote-package form (`url`, `ref`, `files:` list, as in `example-device.yaml`) resolves to exactly the same
 configuration as local `!include`s, for the main file alone and for all three files. (Checked against a local git
 repository; the `github.com` URL itself was not exercised before publication.)
-The generated C++ of the full variant is identical to the author's development build 0.6, which runs on the author's
-device, apart from: version strings, the removed verbose logging of the announcement player, and three first-boot defaults
-(Start After 0.5 s -> 0.2 s, Release After 5 s -> 20 s, Duck Amount 20 dB -> 30 dB; the author's device already ran with
-its own stored values).
+The generated C++ of the full variant is identical to the author's development build of 0.7, which runs on the author's
+device, apart from: version strings, comment text and declaration order, a local variable name in the ducking script
+(`t` -> `trim`), three first-boot defaults (Start After 0.5 s -> 1.0 s, Release After 5 s -> 8 s, Duck Amount 20 dB ->
+30 dB; the author's device already ran with its own stored values), and the id of the web server's sorting group, which
+ESPHome generates differently on every build. (The 0.6 build check used the same method; the 0.6 defaults were 0.2 s / 20 s / 30 dB.)
 
 ## Stage 1-2: build, first flash with passthrough Off (0.1)
 
@@ -115,9 +116,29 @@ Memory in this worst case (radio + line-in + announcement): lowest free internal
 - Priority *Line In wins*, *Duck other* (30 dB preferred over 20 dB) and *Mix* with Music Assistant radio: all as
   labelled, clean mixing.
 
+## Soak test on 0.6 (24 h target)
+
+Started 2026-11-16, stopped by the author after about 23 hours, same setup as above, passthrough Auto, Music Assistant
+radio and the computer used as normal.
+
+- No reboot in about 23 hours.
+- Lowest free internal heap since boot: 105 KB, with `memory-saver` (the target was 20 KB).
+- One false trigger: a short sound crossed the threshold while *Start After* was 0.2 s; the path opened and Music Assistant
+  was muted for the whole *Release After*. Closed by the author: the default *Start After* is 1.0 s from 0.7.
+- Not examined in detail for clicks or drift; none was noticed by ear.
+
+## Version 0.7 (flashed 2026-11-17; short run only)
+
+- Build check of the public files: see the build table above (both variants clean).
+- Levels were balanced by ear with *Music Assistant Trim* -10 dB and *Line In Gain* +10 dB on the author's source (a
+  computer dock at full volume delivers about -31 dBFS on music). The old limit of +12 dB would have been reached sooner.
+- Defaults chosen from use: *Start After* 1 s, *Release After* 8 s (20 s felt too long before Music Assistant came back).
+- Not listened to: gain above +12 dB. 0.7 has run for a short time only, so a long soak on 0.7 is still open.
+
 ## Not tested
 
-- 24 h soak (clicks, drift, reboots): **running**, started 2026-11-16.
+- Long soak of 0.7 (0.6 ran about 23 hours without a reboot, see above); clicks and drift were not measured.
+- Gain above +12 dB.
 - Priority mode *Music Assistant wins*.
 - Streaming line-in to Music Assistant (Sendspin Source) with this firmware, and the local passthrough pausing while it does.
 - Latency in milliseconds.

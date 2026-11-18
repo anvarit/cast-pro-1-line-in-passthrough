@@ -1,8 +1,25 @@
 # Changelog
 
 Versions are shown in the *Apollo Firmware Version* sensor as `<Apollo version>-passthrough-<this version>`.
-All versions were built, in order, on 2026-11-16 against Apollo 26.11.3.3. 0.1 and 0.2 were development builds; the
-public file is the 0.6 state.
+Versions 0.1 to 0.6 were built, in order, on 2026-11-16 against Apollo 26.11.3.3; 0.7 followed on 2026-11-17. 0.1 and
+0.2 were development builds; the first public file was the 0.6 state.
+
+## 0.7 - Music Assistant Trim, gain up to +24 dB, new defaults
+
+- Solves: a weak line-in source (a computer dock at full volume gives about -31 dBFS) sounded much quieter than Music
+  Assistant, and the only tool was *Line In Gain*, which also raises the source's noise.
+- New setting *Music Assistant Trim* (dB, 0 to -30, default 0): turns the Music Assistant input down all the time.
+  It is applied by the single ducking script, on top of the line-in ducking: no signal, `Mix` and `Music Assistant wins`
+  give just the trim; `Duck other` gives trim plus duck amount; `Line In wins` is silent; during an announcement the
+  larger of (trim plus announcement ducking) and what line-in wants. Capped at 80 dB; the announcement input and line-in
+  are never trimmed. With the trim at 0 the behaviour is exactly that of 0.6.
+- *Line In Gain* now goes up to +24 dB (was +12). The range is still safe for the 32-bit math in the audio callback
+  (checked in the comments in the file). Gain above +12 dB has not been listened to.
+- New first-boot defaults (stored values on existing devices are kept): *Start After* 0.2 s -> 1.0 s, because a short blip
+  at 0.2 s caused a false trigger in the 23-hour soak; *Release After* 20 s -> 8 s, because 20 s felt too long before
+  Music Assistant came back (announcements are handled separately). *Keep Warm* stays 15 minutes, *Duck Amount* 30 dB.
+- README: soak result of 0.6, new troubleshooting entries; `example-device.yaml` pins `ref: v0.7.0`.
+- Not changed: Apollo pin (26.11.3.3), `memory-saver`, `diagnostics`.
 
 ## 0.6 - Bluetooth proxy and WizMote off at boot (now the optional `memory-saver` package)
 

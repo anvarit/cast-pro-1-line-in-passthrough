@@ -32,7 +32,7 @@
 
 substitutions:
   # Shown in the "Apollo Firmware Version" sensor. Apollo version first, then this add-on's version.
-  version: "26.11.3.3-passthrough-0.6"
+  version: "26.11.3.3-passthrough-0.7"
 
 packages:
   # Apollo's stock firmware. To move to a newer Apollo release: change `ref` to the new tag's commit, re-read the
@@ -85,8 +85,19 @@ script:
   # both inputs from the current state and only sends a new ramp when that target actually changes, so there is nothing
   # to refresh or fight over. It has no delays inside, so it runs to completion within each call.
   #
-  #   media (Music Assistant) target = announcing ? max(|Announcement Ducking|, what line-in wants) : what line-in wants
-  #   line-in target                 = announcing ? max(|Announcement Ducking|, 30 dB) : 0
+  # Since 0.7 it also applies the "Music Assistant Trim" (see the number of that name below), and it is called from the
+  # trim slider too, so a change of the slider takes effect at once.
+  #
+  #   trim  = |Music Assistant Trim| (0..30 dB): a fixed base attenuation of the media input only
+  #   want  = what line-in wants on top of the trim (Line In wins 80 dB, Duck other = Duck Amount, otherwise 0)
+  #   base  = min(trim + want, 80)                                  (80 dB is the most a mixer input can be ducked)
+  #   media (Music Assistant) target = announcing ? max(min(trim + |Announcement Ducking|, 80), base) : base
+  #   line-in target                 = announcing ? max(|Announcement Ducking|, 30 dB) : 0       (line-in is never trimmed)
+  #
+  # In plain words: with no line-in signal, or in Mix / Music Assistant wins, Music Assistant just plays at the trim
+  # level. In Duck other it is turned down by the trim plus the duck amount. In Line In wins it is silent. During an
+  # announcement it is turned down by the larger of "trim + announcement ducking" and whatever line-in wants. The
+  # announcement input itself and line-in are never trimmed. With the trim at 0 dB everything behaves exactly as in 0.6.
   #
   # Ramps (milliseconds): ducking MORE at an announcement start happens at once (0), as in stock; un-ducking after an
   # announcement takes 1000 as in stock; every other change takes 500. Line-in: ducks at once, restores in 1000.
@@ -98,7 +109,12 @@ script:
           const bool ann = id(external_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
           const int16_t ann_mag = (int16_t) clamp<float>(-id(announcement_ducking).state, 0.0f, 80.0f);
           const int16_t want_m = id(lp_want_m);
-          const int16_t tm = ann ? std::max<int16_t>(ann_mag, want_m) : want_m;
+          // Music Assistant Trim as a positive number of dB (the slider is 0 .. -30). The slider has no value for a
+          // moment after boot (NaN), which counts as 0.
+          const float trim_f = id(lp_ma_trim).state;
+          const int16_t trim = std::isnan(trim_f) ? 0 : (int16_t) clamp<float>(-trim_f, 0.0f, 30.0f);
+          const int16_t base = std::min<int16_t>(trim + want_m, 80);
+          const int16_t tm = ann ? std::max<int16_t>(std::min<int16_t>(trim + ann_mag, 80), base) : base;
           if (tm != media_applied) {
             uint32_t ms = 0;
             if (media_applied >= 0) {
@@ -180,7 +196,7 @@ globals:
   - id: lp_scratch            # gain-scaled copy of the ADC buffer, kept in PSRAM (not scarce internal RAM)
     type: int32_t *
     initial_value: 'nullptr'
-  - id: lp_want_m             # how many dB the line-in wants Music Assistant ducked; set by the controller
+  - id: lp_want_m             # how many dB the line-in wants Music Assistant ducked (on top of the trim); set by the controller
     type: int16_t
     initial_value: '0'
 
@@ -263,7 +279,7 @@ number:
     min_value: 0.2
     max_value: 10
     step: 0.1
-    initial_value: 0.2
+    initial_value: 1.0           # 0.2 s let a short blip start the path; 1 s ignores it (still fast for real sound)
     optimistic: true
     restore_value: true
     entity_category: config
@@ -274,7 +290,7 @@ number:
     min_value: 1
     max_value: 600
     step: 1
-    initial_value: 20
+    initial_value: 8             # 20 s felt too long before Music Assistant came back; announcements are handled separately
     optimistic: true
     restore_value: true
     entity_category: config
@@ -305,14 +321,33 @@ number:
     name: "Line In Gain"
     unit_of_measurement: dB
     min_value: -30
-    max_value: 12
+    max_value: 24                # was 12 up to 0.6. Gain also raises the source's own noise: prefer Music Assistant Trim first.
     step: 0.5
     initial_value: 0
     optimistic: true
     restore_value: true
     entity_category: config
+    # Overflow check for the callback above: (sample * gain) is a 64-bit product. |sample| <= 2^31 and the largest gain
+    # is 65536 * 10^(24/20), about 2^20, so the product stays below 2^52, and the result is clamped to 32 bits anyway.
     on_value:
       - lambda: 'id(lp_gain_q16).store((int32_t) (65536.0f * powf(10.0f, x / 20.0f)));'
+  # New in 0.7: turns the Music Assistant (media) input down inside the device, so a weak line-in source can be balanced
+  # against it without amplifying line-in noise. Negative dB like Apollo's "Announcement Ducking": 0 = full level,
+  # -30 = 30 dB quieter. lp_duck_sync applies it as a base attenuation (rules there); the announcement input is never
+  # trimmed. Default 0 = no change compared to 0.6.
+  - platform: template
+    id: lp_ma_trim
+    name: "Music Assistant Trim"
+    unit_of_measurement: dB
+    min_value: -30
+    max_value: 0
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: lp_duck_sync
 
 sensor:
   - platform: template
